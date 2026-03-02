@@ -1,0 +1,25 @@
+# Claude Code local settings
+.claude/
+
+# Dependencies
+node_modules/
+
+# Build output
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+
+# Wrangler cache
+.wrangler/
+worker/.wrangler/
+
+# Env files with secrets
+.env.local
+.env.*.local
+.env.production
+
+# Credentials — DO NOT COMMIT
+otherconfig.txt
+
+# OS
+.DS_Store
+Thumbs.db

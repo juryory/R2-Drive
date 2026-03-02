@@ -1,0 +1,17 @@
+name = "r2-drive-worker"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "file"
+
+[vars]
+# 前端允许访问的域名，多个用逗号分隔（部署后改为你的实际域名）
+ALLOWED_ORIGINS = "http://localhost:5173,https://file.juryory.com,https://r2-drive-frontend.pages.dev,https://drive.juryory.com"
+
+# 以下通过 wrangler secret put 命令设置（不要写在这里）：
+# wrangler secret put JWT_SECRET        → 随机长字符串，用于签发 JWT
+# wrangler secret put ADMIN_USERNAME    → 管理员用户名
+# wrangler secret put ADMIN_PASSWORD    → 管理员密码
