@@ -7,19 +7,18 @@ node_modules/
 # Build output
 frontend/dist/
 frontend/tsconfig.tsbuildinfo
+server/dist/
 
-# Wrangler cache
-.wrangler/
-worker/.wrangler/
-
-# Env files with secrets
+# Env files with secrets — DO NOT COMMIT
+.env
 .env.local
 .env.*.local
 .env.production
+server/.env
 
-# Wrangler 本地开发密钥（COS SecretId/SecretKey 等）
-.dev.vars
-worker/.dev.vars
+# PM2 日志
+logs/
+*.log
 
 # Credentials — DO NOT COMMIT
 otherconfig.txt

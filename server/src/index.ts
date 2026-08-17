@@ -9,10 +9,14 @@ const app = new Hono<{ Bindings: Env; Variables: Variables }>()
 
 // CORS 中间件
 app.use('*', async (c, next) => {
-  const allowedOrigins = (c.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim())
+  // 同源部署时 ALLOWED_ORIGINS 为空，此时不下发任何 CORS 头
+  const allowedOrigins = (c.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
   const origin = c.req.header('Origin') || ''
 
-  if (allowedOrigins.includes(origin)) {
+  if (origin && allowedOrigins.includes(origin)) {
     c.header('Access-Control-Allow-Origin', origin)
     c.header('Access-Control-Allow-Credentials', 'true')
     c.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')

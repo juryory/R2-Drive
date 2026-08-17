@@ -2,7 +2,7 @@
  * 腾讯云 COS 请求签名（q-sign-algorithm=sha1）
  * 文档：https://cloud.tencent.com/document/product/436/7778
  *
- * 全部基于 Web Crypto 实现，不依赖 Node 内置模块，可直接在 Workers 运行。
+ * 全部基于 Web Crypto 实现，不依赖任何 COS SDK。
  */
 
 const encoder = new TextEncoder()

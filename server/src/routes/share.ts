@@ -3,11 +3,12 @@ import { SignJWT, jwtVerify } from 'jose'
 import { Env, Variables } from '../types'
 import { authMiddleware } from '../middleware/auth'
 import { buildHashedKey } from '../utils'
+import { maxUploadBytes } from '../env'
 import { getCos } from '../storage/cos'
 
 const share = new Hono<{ Bindings: Env; Variables: Variables }>()
 
-const MAX_SIZE = 100 * 1024 * 1024
+const MAX_SIZE = maxUploadBytes()
 
 // POST /api/share/create-upload-link（需要登录）
 // 生成一个 24 小时有效的上传链接 token
@@ -57,7 +58,7 @@ share.post('/upload', async (c) => {
     return c.json({ error: 'Empty file' }, 400)
   }
   if (file.size > MAX_SIZE) {
-    return c.json({ error: 'File too large (max 100MB)' }, 413)
+    return c.json({ error: `文件过大（上限 ${Math.floor(MAX_SIZE / 1024 / 1024)}MB）` }, 413)
   }
 
   const key = await buildHashedKey('uploads/', file)

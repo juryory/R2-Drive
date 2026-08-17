@@ -3,14 +3,15 @@ import { Env, Variables } from '../types'
 import { authMiddleware } from '../middleware/auth'
 import { buildHashedKey, guessContentType } from '../utils'
 import { getCos, CosClient, CosObject } from '../storage/cos'
+import { maxUploadBytes } from '../env'
 
 const files = new Hono<{ Bindings: Env; Variables: Variables }>()
 
 // 所有文件路由都需要鉴权
 files.use('*', authMiddleware)
 
-// 100MB 限制（Workers 单次请求体上限）
-const MAX_SIZE = 100 * 1024 * 1024
+// 由 MAX_UPLOAD_MB 环境变量控制，默认 200MB
+const MAX_SIZE = maxUploadBytes()
 
 /** 遍历所有分页，把匹配前缀的对象全部取出 */
 async function listAll(cos: CosClient, prefix?: string): Promise<CosObject[]> {
@@ -76,7 +77,7 @@ files.post('/upload', async (c) => {
   }
 
   if (file.size > MAX_SIZE) {
-    return c.json({ error: 'File too large (max 100MB)' }, 413)
+    return c.json({ error: `文件过大（上限 ${Math.floor(MAX_SIZE / 1024 / 1024)}MB）` }, 413)
   }
 
   const key = `${prefix}${file.name}`
@@ -186,7 +187,7 @@ files.post('/rename', async (c) => {
   }
 
   // COS 没有原生 rename，用服务端复制后删除原对象
-  // 复制在 COS 内部完成，文件内容不经过 Worker
+  // 复制在 COS 内部完成，文件内容不经过本服务器
   await cos.copyObject(oldKey, newKey)
   await cos.deleteObjects([oldKey])
 
@@ -268,7 +269,7 @@ files.post('/quick-upload', async (c) => {
     return c.json({ error: 'Empty file' }, 400)
   }
   if (file.size > MAX_SIZE) {
-    return c.json({ error: 'File too large (max 100MB)' }, 413)
+    return c.json({ error: `文件过大（上限 ${Math.floor(MAX_SIZE / 1024 / 1024)}MB）` }, 413)
   }
 
   const key = await buildHashedKey('drive/', file)

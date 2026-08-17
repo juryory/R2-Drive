@@ -1,6 +1,6 @@
 import { ListResponse, StorageStats, FileItem } from '../types'
 
-// 开发时使用代理，生产时指向 Worker 域名
+// 同域名部署时留空走相对路径；跨域部署时用 VITE_API_BASE 指定后端地址
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 
 function getToken(): string | null {

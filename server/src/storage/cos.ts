@@ -5,6 +5,7 @@
  * 方便路由层平移。所有请求都走 fetch，无需任何 Node SDK。
  */
 
+import { createHash } from 'node:crypto'
 import { Env } from '../types'
 import { buildAuthorization, encodePath, encodeRfc3986 } from './sign'
 
@@ -37,6 +38,12 @@ export type CosListResult = {
 
 /** COS 单次批量删除上限 */
 export const MAX_DELETE_BATCH = 1000
+
+/**
+ * 请求体类型。@types/node 没有暴露全局 BodyInit，
+ * 这里按本项目实际用到的几种精确声明，免得为此引入整个 DOM lib
+ */
+type RequestBody = string | Uint8Array | Blob
 
 // ---------------------------------------------------------------- XML 解析
 
@@ -104,7 +111,10 @@ function decodeListValue(value: string): string {
 export class CosClient {
   private readonly secretId: string
   private readonly secretKey: string
+  /** 请求实际发往的主机名，同时作为签名里的 host */
   private readonly host: string
+  /** 协议 + 主机名 */
+  private readonly origin: string
 
   constructor(env: Env) {
     const missing = (
@@ -117,8 +127,19 @@ export class CosClient {
 
     this.secretId = env.COS_SECRET_ID
     this.secretKey = env.COS_SECRET_KEY
-    // 存储桶名称必须带 APPID，例如 file-1250000000
-    this.host = `${env.COS_BUCKET}.cos.${env.COS_REGION}.myqcloud.com`
+
+    // 默认用公网域名（同地域服务器访问时腾讯云会自动解析到内网）。
+    // COS_ENDPOINT 可覆盖为内网域名或自定义加速域名
+    const endpoint = env.COS_ENDPOINT?.trim()
+    if (endpoint) {
+      const url = new URL(endpoint.includes('://') ? endpoint : `https://${endpoint}`)
+      this.host = url.host
+      this.origin = url.origin
+    } else {
+      // 存储桶名称必须带 APPID，例如 file-1250000000
+      this.host = `${env.COS_BUCKET}.cos.${env.COS_REGION}.myqcloud.com`
+      this.origin = `https://${this.host}`
+    }
   }
 
   private async request(opts: {
@@ -127,7 +148,7 @@ export class CosClient {
     key?: string
     query?: Record<string, string>
     headers?: Record<string, string>
-    body?: BodyInit | null
+    body?: RequestBody | null
     /** 这些状态码不视为错误，直接把 Response 交给调用方 */
     passthroughStatus?: number[]
   }): Promise<Response> {
@@ -149,7 +170,7 @@ export class CosClient {
     const queryString = Object.entries(query)
       .map(([k, v]) => `${encodeRfc3986(k)}=${encodeRfc3986(v)}`)
       .join('&')
-    const url = `https://${this.host}${encodePath(pathname)}${queryString ? `?${queryString}` : ''}`
+    const url = `${this.origin}${encodePath(pathname)}${queryString ? `?${queryString}` : ''}`
 
     const response = await fetch(url, {
       method: opts.method,
@@ -211,7 +232,7 @@ export class CosClient {
   /** 上传对象。meta 会写成 x-cos-meta-* 自定义头 */
   async putObject(
     key: string,
-    body: BodyInit,
+    body: RequestBody,
     opts: { contentType?: string; meta?: Record<string, string> } = {}
   ): Promise<void> {
     const headers: Record<string, string> = {
@@ -246,7 +267,7 @@ export class CosClient {
     return response.status !== 404
   }
 
-  /** 服务端复制，用于重命名 / 移动，不消耗 Worker 带宽 */
+  /** 服务端复制，用于重命名 / 移动，不消耗本机带宽 */
   async copyObject(sourceKey: string, destKey: string): Promise<void> {
     await this.request({
       method: 'PUT',
@@ -275,8 +296,8 @@ export class CosClient {
       '</Delete>'
 
     // COS 的批量删除强制要求 Content-MD5
-    const digest = await crypto.subtle.digest('MD5', new TextEncoder().encode(body))
-    const contentMd5 = btoa(String.fromCharCode(...new Uint8Array(digest)))
+    // 注意：Web Crypto 不支持 MD5，只能用 Node 的 crypto 模块
+    const contentMd5 = createHash('md5').update(body, 'utf8').digest('base64')
 
     await this.request({
       method: 'POST',
