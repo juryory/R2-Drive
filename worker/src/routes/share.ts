@@ -3,6 +3,7 @@ import { SignJWT, jwtVerify } from 'jose'
 import { Env, Variables } from '../types'
 import { authMiddleware } from '../middleware/auth'
 import { buildHashedKey } from '../utils'
+import { getCos } from '../storage/cos'
 
 const share = new Hono<{ Bindings: Env; Variables: Variables }>()
 
@@ -61,11 +62,11 @@ share.post('/upload', async (c) => {
 
   const key = await buildHashedKey('uploads/', file)
 
-  await c.env.BUCKET.put(key, file.stream(), {
-    httpMetadata: { contentType: file.type || 'application/octet-stream' },
-    customMetadata: {
-      originalName: file.name,
-      uploadedAt: new Date().toISOString(),
+  await getCos(c.env).putObject(key, file, {
+    contentType: file.type || 'application/octet-stream',
+    meta: {
+      originalname: file.name,
+      uploadedat: new Date().toISOString(),
       source: 'share-link',
     },
   })

@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { Env, Variables } from './types'
+import { CosError } from './storage/cos'
 import authRoutes from './routes/auth'
 import filesRoutes from './routes/files'
 import shareRoutes from './routes/share'
@@ -20,7 +21,7 @@ app.use('*', async (c, next) => {
   }
 
   if (c.req.method === 'OPTIONS') {
-    return c.text('', 204)
+    return c.body(null, 204)
   }
 
   await next()
@@ -33,6 +34,10 @@ app.route('/api/share', shareRoutes)
 app.notFound((c) => c.json({ error: 'Not found' }, 404))
 app.onError((err, c) => {
   console.error(err)
+  // COS 的配置错误和上游错误单独透出，否则排查时只能看到一句 500
+  if (err instanceof CosError) {
+    return c.json({ error: err.message }, err.status)
+  }
   return c.json({ error: 'Internal server error' }, 500)
 })
 

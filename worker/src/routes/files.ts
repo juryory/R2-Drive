@@ -1,25 +1,40 @@
 import { Hono } from 'hono'
 import { Env, Variables } from '../types'
 import { authMiddleware } from '../middleware/auth'
-import { buildHashedKey } from '../utils'
+import { buildHashedKey, guessContentType } from '../utils'
+import { getCos, CosClient, CosObject } from '../storage/cos'
 
 const files = new Hono<{ Bindings: Env; Variables: Variables }>()
 
 // 所有文件路由都需要鉴权
 files.use('*', authMiddleware)
 
+// 100MB 限制（Workers 单次请求体上限）
+const MAX_SIZE = 100 * 1024 * 1024
+
+/** 遍历所有分页，把匹配前缀的对象全部取出 */
+async function listAll(cos: CosClient, prefix?: string): Promise<CosObject[]> {
+  const objects: CosObject[] = []
+  let marker: string | undefined
+
+  do {
+    const result = await cos.list({ prefix, marker, maxKeys: 1000 })
+    objects.push(...result.objects)
+    marker = result.nextMarker
+  } while (marker)
+
+  return objects
+}
+
 // GET /api/files?prefix=folder/path/
 // 列出当前目录下的文件和子文件夹
 files.get('/', async (c) => {
   const prefix = c.req.query('prefix') || ''
+  const cos = getCos(c.env)
 
-  const result = await c.env.BUCKET.list({
-    prefix,
-    delimiter: '/',
-    limit: 1000,
-  })
+  const result = await cos.list({ prefix, delimiter: '/', maxKeys: 1000 })
 
-  const folders = result.delimitedPrefixes.map((p) => ({
+  const folders = result.prefixes.map((p) => ({
     type: 'folder' as const,
     key: p,
     name: p.slice(prefix.length, -1), // 去掉前缀和末尾的 /
@@ -32,8 +47,8 @@ files.get('/', async (c) => {
       key: obj.key,
       name: obj.key.slice(prefix.length),
       size: obj.size,
-      uploaded: obj.uploaded.toISOString(),
-      contentType: obj.httpMetadata?.contentType ?? 'application/octet-stream',
+      uploaded: obj.lastModified,
+      contentType: guessContentType(obj.key),
     }))
 
   return c.json({ folders, files: fileItems, prefix })
@@ -60,21 +75,17 @@ files.post('/upload', async (c) => {
     return c.json({ error: 'Empty file' }, 400)
   }
 
-  // 100MB 限制（Workers 免费计划）
-  const MAX_SIZE = 100 * 1024 * 1024
   if (file.size > MAX_SIZE) {
     return c.json({ error: 'File too large (max 100MB)' }, 413)
   }
 
   const key = `${prefix}${file.name}`
 
-  await c.env.BUCKET.put(key, file.stream(), {
-    httpMetadata: {
-      contentType: file.type || 'application/octet-stream',
-    },
-    customMetadata: {
-      originalName: file.name,
-      uploadedAt: new Date().toISOString(),
+  await getCos(c.env).putObject(key, file, {
+    contentType: file.type || 'application/octet-stream',
+    meta: {
+      originalname: file.name,
+      uploadedat: new Date().toISOString(),
     },
   })
 
@@ -97,43 +108,29 @@ files.delete('/', async (c) => {
     return c.json({ error: 'No keys provided' }, 400)
   }
 
+  const cos = getCos(c.env)
+
   // 对于文件夹（key 以 / 结尾），递归列出并删除所有内容
   const keysToDelete: string[] = []
 
   for (const key of keys) {
     if (key.endsWith('/')) {
-      // 文件夹：列出所有子文件
-      let cursor: string | undefined
-      do {
-        const list = await c.env.BUCKET.list({
-          prefix: key,
-          limit: 1000,
-          cursor,
-        })
-        for (const obj of list.objects) {
-          keysToDelete.push(obj.key)
-        }
-        cursor = list.truncated ? list.cursor : undefined
-      } while (cursor)
+      const objects = await listAll(cos, key)
+      keysToDelete.push(...objects.map((obj) => obj.key))
     } else {
       keysToDelete.push(key)
     }
   }
 
   if (keysToDelete.length > 0) {
-    // R2 支持批量删除（最多 1000 个）
-    const chunks: string[][] = []
-    for (let i = 0; i < keysToDelete.length; i += 1000) {
-      chunks.push(keysToDelete.slice(i, i + 1000))
-    }
-    await Promise.all(chunks.map((chunk) => c.env.BUCKET.delete(chunk)))
+    await cos.deleteObjects(keysToDelete)
   }
 
   return c.json({ success: true, deleted: keysToDelete.length })
 })
 
 // POST /api/files/folder
-// 创建文件夹（在 R2 中创建 .keep 占位文件）
+// 创建文件夹（在 COS 中创建 .keep 占位文件）
 files.post('/folder', async (c) => {
   let body: { path?: string }
   try {
@@ -154,16 +151,16 @@ files.post('/folder', async (c) => {
     return c.json({ error: 'Invalid folder name' }, 400)
   }
 
-  await c.env.BUCKET.put(`${path}.keep`, new Uint8Array(0), {
-    httpMetadata: { contentType: 'text/plain' },
-    customMetadata: { type: 'folder-placeholder' },
+  await getCos(c.env).putObject(`${path}.keep`, new Uint8Array(0), {
+    contentType: 'text/plain',
+    meta: { type: 'folder-placeholder' },
   })
 
   return c.json({ success: true, path })
 })
 
 // POST /api/files/rename
-// 重命名 / 移动文件（复制 + 删除原文件）
+// 重命名 / 移动文件（服务端复制 + 删除原文件）
 files.post('/rename', async (c) => {
   let body: { oldKey?: string; newKey?: string }
   try {
@@ -182,20 +179,50 @@ files.post('/rename', async (c) => {
     return c.json({ error: 'Old and new keys are the same' }, 400)
   }
 
-  const source = await c.env.BUCKET.get(oldKey)
-  if (!source) {
+  const cos = getCos(c.env)
+
+  if (!(await cos.objectExists(oldKey))) {
     return c.json({ error: 'Source file not found' }, 404)
   }
 
-  // R2 目前没有原生 rename，需要复制后删除
-  await c.env.BUCKET.put(newKey, source.body, {
-    httpMetadata: source.httpMetadata,
-    customMetadata: source.customMetadata,
-  })
-  await c.env.BUCKET.delete(oldKey)
+  // COS 没有原生 rename，用服务端复制后删除原对象
+  // 复制在 COS 内部完成，文件内容不经过 Worker
+  await cos.copyObject(oldKey, newKey)
+  await cos.deleteObjects([oldKey])
 
   return c.json({ success: true })
 })
+
+/** download / preview 共用的取对象逻辑 */
+async function serveObject(
+  cos: CosClient,
+  key: string,
+  disposition: 'attachment' | 'inline'
+): Promise<Response | null> {
+  const object = await cos.getObject(key)
+  if (!object) return null
+
+  const headers = new Headers()
+  headers.set('Content-Type', object.headers.get('Content-Type') ?? guessContentType(key))
+
+  const contentLength = object.headers.get('Content-Length')
+  if (contentLength) headers.set('Content-Length', contentLength)
+
+  const etag = object.headers.get('ETag')
+  if (etag) headers.set('ETag', etag)
+
+  if (disposition === 'inline') {
+    headers.set('Cache-Control', 'private, max-age=3600')
+  }
+
+  const filename = key.split('/').pop() ?? (disposition === 'attachment' ? 'download' : 'file')
+  headers.set(
+    'Content-Disposition',
+    `${disposition}; filename*=UTF-8''${encodeURIComponent(filename)}`
+  )
+
+  return new Response(object.body, { headers })
+}
 
 // GET /api/files/download?key=path/to/file
 // 下载文件（以附件方式）
@@ -206,24 +233,8 @@ files.get('/download', async (c) => {
     return c.json({ error: 'key is required' }, 400)
   }
 
-  const object = await c.env.BUCKET.get(key)
-
-  if (!object) {
-    return c.json({ error: 'File not found' }, 404)
-  }
-
-  const headers = new Headers()
-  object.writeHttpMetadata(headers)
-  headers.set('ETag', object.httpEtag)
-
-  const filename = key.split('/').pop() ?? 'download'
-  headers.set(
-    'Content-Disposition',
-    `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`
-  )
-  headers.set('Content-Length', object.size.toString())
-
-  return new Response(object.body, { headers })
+  const response = await serveObject(getCos(c.env), key, 'attachment')
+  return response ?? c.json({ error: 'File not found' }, 404)
 })
 
 // GET /api/files/preview?key=path/to/file
@@ -235,24 +246,8 @@ files.get('/preview', async (c) => {
     return c.json({ error: 'key is required' }, 400)
   }
 
-  const object = await c.env.BUCKET.get(key)
-
-  if (!object) {
-    return c.json({ error: 'File not found' }, 404)
-  }
-
-  const headers = new Headers()
-  object.writeHttpMetadata(headers)
-  headers.set('ETag', object.httpEtag)
-  headers.set('Cache-Control', 'private, max-age=3600')
-
-  const filename = key.split('/').pop() ?? 'file'
-  headers.set(
-    'Content-Disposition',
-    `inline; filename*=UTF-8''${encodeURIComponent(filename)}`
-  )
-
-  return new Response(object.body, { headers })
+  const response = await serveObject(getCos(c.env), key, 'inline')
+  return response ?? c.json({ error: 'File not found' }, 404)
 })
 
 // POST /api/files/quick-upload
@@ -272,18 +267,17 @@ files.post('/quick-upload', async (c) => {
   if (file.size === 0) {
     return c.json({ error: 'Empty file' }, 400)
   }
-  const MAX_SIZE = 100 * 1024 * 1024
   if (file.size > MAX_SIZE) {
     return c.json({ error: 'File too large (max 100MB)' }, 413)
   }
 
   const key = await buildHashedKey('drive/', file)
 
-  await c.env.BUCKET.put(key, file.stream(), {
-    httpMetadata: { contentType: file.type || 'application/octet-stream' },
-    customMetadata: {
-      originalName: file.name,
-      uploadedAt: new Date().toISOString(),
+  await getCos(c.env).putObject(key, file, {
+    contentType: file.type || 'application/octet-stream',
+    meta: {
+      originalname: file.name,
+      uploadedat: new Date().toISOString(),
       source: 'quick-upload',
     },
   })
@@ -294,32 +288,18 @@ files.post('/quick-upload', async (c) => {
 // GET /api/files/all
 // 列出所有文件（扁平列表，用于空间管理模式）
 files.get('/all', async (c) => {
-  const allFiles: Array<{
-    type: 'file'
-    key: string
-    name: string
-    size: number
-    uploaded: string
-    contentType: string
-  }> = []
-  let cursor: string | undefined
+  const objects = await listAll(getCos(c.env))
 
-  do {
-    const result = await c.env.BUCKET.list({ limit: 1000, cursor })
-    for (const obj of result.objects) {
-      if (!obj.key.endsWith('/.keep')) {
-        allFiles.push({
-          type: 'file',
-          key: obj.key,
-          name: obj.key.split('/').pop() ?? obj.key,
-          size: obj.size,
-          uploaded: obj.uploaded.toISOString(),
-          contentType: obj.httpMetadata?.contentType ?? 'application/octet-stream',
-        })
-      }
-    }
-    cursor = result.truncated ? result.cursor : undefined
-  } while (cursor)
+  const allFiles = objects
+    .filter((obj) => !obj.key.endsWith('/.keep'))
+    .map((obj) => ({
+      type: 'file' as const,
+      key: obj.key,
+      name: obj.key.split('/').pop() ?? obj.key,
+      size: obj.size,
+      uploaded: obj.lastModified,
+      contentType: guessContentType(obj.key),
+    }))
 
   return c.json({ files: allFiles })
 })
@@ -327,21 +307,18 @@ files.get('/all', async (c) => {
 // GET /api/files/stats
 // 存储使用情况统计
 files.get('/stats', async (c) => {
+  const objects = await listAll(getCos(c.env))
+
   let totalSize = 0
   let fileCount = 0
-  let cursor: string | undefined
 
-  do {
-    const result = await c.env.BUCKET.list({ limit: 1000, cursor })
-    for (const obj of result.objects) {
-      // 排除文件夹占位文件
-      if (!obj.key.endsWith('/.keep')) {
-        totalSize += obj.size
-        fileCount++
-      }
+  for (const obj of objects) {
+    // 排除文件夹占位文件
+    if (!obj.key.endsWith('/.keep')) {
+      totalSize += obj.size
+      fileCount++
     }
-    cursor = result.truncated ? result.cursor : undefined
-  } while (cursor)
+  }
 
   return c.json({ totalSize, fileCount })
 })

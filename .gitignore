@@ -17,6 +17,10 @@ worker/.wrangler/
 .env.*.local
 .env.production
 
+# Wrangler 本地开发密钥（COS SecretId/SecretKey 等）
+.dev.vars
+worker/.dev.vars
+
 # Credentials — DO NOT COMMIT
 otherconfig.txt
 
