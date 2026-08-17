@@ -210,40 +210,74 @@ PORT=3000
 
 宝塔面板 → **网站** → **添加站点**，域名填你的域名，PHP 版本选**纯静态**。
 
-然后点站点 → **配置文件**，把 `server` 块里的内容改成下面这样（保留宝塔自己生成的 SSL、日志等配置）：
+**不需要**把宝塔生成的配置整个替换掉 —— SSL、日志、敏感文件拦截那些都保留，只做下面三处改动。
 
-```nginx
-# 前端静态文件
-root /www/wwwroot/cos-drive/frontend/dist;
-index index.html;
+#### 6.1 站点目录指向前端构建产物
 
-# 前端用的是 BrowserRouter，未命中的路径都交给 index.html
-location / {
-    try_files $uri $uri/ /index.html;
-}
+面板 → 站点 → **设置** → **网站目录**，改成：
 
-# API 反代到 Node 进程
-location /api/ {
-    proxy_pass http://127.0.0.1:3000;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-
-    # 上传大文件需要放开限制，并调长超时
-    client_max_body_size 200m;
-    proxy_read_timeout 600s;
-    proxy_send_timeout 600s;
-    # 上传/下载走流式，不要让 nginx 整个缓冲下来
-    proxy_request_buffering off;
-    proxy_buffering off;
-}
+```
+/www/wwwroot/cos-drive/frontend/dist
 ```
 
-> `client_max_body_size` 要 **≥** `.env` 里的 `MAX_UPLOAD_MB`，否则大文件会被 nginx 挡在外面（返回 413）。
+> 用面板 UI 改，不要手写配置里的 `root` —— 之后任何在 UI 里动站点设置都会把手写的覆盖回去。
 
-保存后重载 nginx。
+#### 6.2 加两个 location 块
+
+点站点 → **配置文件**，在 `access_log` 那两行之前插入：
+
+```nginx
+    # API 反代到 Node 进程
+    location ^~ /api/ {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 上传大文件需要放开限制并调长超时，面板的反代 UI 不会加这几行
+        client_max_body_size 200m;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+        # 上传/下载走流式，不要让 nginx 整个缓冲下来
+        proxy_request_buffering off;
+        proxy_buffering off;
+    }
+
+    # 前端用的是 BrowserRouter，未命中的路径都交给 index.html
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # 避免重新构建后浏览器拿着旧 index.html 去请求已不存在的旧资源（表现为白屏）
+    location = /index.html {
+        add_header Cache-Control "no-cache, must-revalidate";
+    }
+```
+
+两个容易踩的点：
+
+- **`proxy_pass` 结尾不要加斜杠。** 写成 `http://127.0.0.1:3000/` 会把 `/api/` 前缀吃掉，所有接口变 404。
+- **用 `^~ /api/` 而非 `/api/`。** 宝塔默认配置里有 `location ~ .*\.(js|css)?$` 这类正则 location，nginx 中正则优先级高于普通前缀匹配，`^~` 可确保 API 请求不被截走。
+
+#### 6.3 确认上传体积限制
+
+`client_max_body_size` 要 **≥** `.env` 里的 `MAX_UPLOAD_MB`，否则大文件会被 nginx 挡在外面（返回 413），而后端日志里什么都看不到。
+
+> ⚠️ **不要只用面板的「反向代理」功能就以为完事了。** 它生成的 `#PROXY-START` 块只有 `proxy_pass` 和几个 header，既没有 `client_max_body_size`（于是继承 Nginx 全局的 50m，传大文件报 413），也没有加长的 `proxy_read_timeout`（默认 60s，大文件「收完 → 转存 COS → 才响应」很容易超时报 504）。
+>
+> 想用 UI 加反代也行，但记得到生成的 `#PROXY-START` 块里把上面那几行补进去。
+
+保存后重载 nginx，验证：
+
+```bash
+curl -I  http://你的域名/                # 200，返回 index.html
+curl -I  http://你的域名/login           # 200 而非 404，说明 SPA fallback 生效
+curl -s  http://你的域名/api/auth/me     # {"error":"Unauthorized"}，说明反代通了
+```
+
+第三条返回 `Unauthorized` 就是对的 —— 说明请求已经打到 Node 进程。若返回 404 或 502，则是反代没生效或后端没启动。
 
 ### 第七步：申请 HTTPS
 
