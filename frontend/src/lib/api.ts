@@ -3,6 +3,12 @@ import { ListResponse, StorageStats, FileItem } from '../types'
 // 同域名部署时留空走相对路径；跨域部署时用 VITE_API_BASE 指定后端地址
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 
+// 下载/预览/复制链接需要完整 URL（复制到剪贴板后要能脱离本页面单独打开）。
+// 同域部署时 API_BASE 为空，退回用当前页面的 origin 拼出完整地址。
+function apiOrigin(): string {
+  return API_BASE || window.location.origin
+}
+
 function getToken(): string | null {
   return localStorage.getItem('r2drive_token')
 }
@@ -176,12 +182,12 @@ export const api = {
 
   getDownloadUrl(key: string): string {
     const token = getToken()
-    return `${API_BASE}/api/files/download?key=${encodeURIComponent(key)}&token=${token ?? ''}`
+    return `${apiOrigin()}/api/files/download?key=${encodeURIComponent(key)}&token=${token ?? ''}`
   },
 
   getPreviewUrl(key: string): string {
     const token = getToken()
-    return `${API_BASE}/api/files/preview?key=${encodeURIComponent(key)}&token=${token ?? ''}`
+    return `${apiOrigin()}/api/files/preview?key=${encodeURIComponent(key)}&token=${token ?? ''}`
   },
 
   getStats(): Promise<StorageStats> {

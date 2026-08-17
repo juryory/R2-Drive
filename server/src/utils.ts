@@ -89,3 +89,26 @@ export function guessContentType(key: string): string {
   const ext = name.slice(lastDot + 1).toLowerCase()
   return CONTENT_TYPES[ext] ?? 'application/octet-stream'
 }
+
+/**
+ * 构建符合 RFC 6266 的 Content-Disposition 值
+ *
+ * 只写 filename*（RFC 5987 扩展写法，支持中文）不够：部分浏览器内置的
+ * PDF 查看器等场景不认这个写法时会直接退回用 URL 路径取文件名，
+ * 对预览接口（/api/files/preview?key=...）这意味着文件名会变成
+ * URL 最后一段的字面量 "preview"。必须同时提供纯 ASCII 的 filename
+ * 兜底，两者都写才是标准做法。
+ */
+export function buildContentDisposition(
+  disposition: 'attachment' | 'inline',
+  filename: string
+): string {
+  // 兜底名去掉控制字符（含换行，防止头注入）、非 ASCII 字符和引号/反斜杠
+  const asciiFallback =
+    filename
+      .replace(/[^\x20-\x7E]/g, '_')
+      .replace(/["\\]/g, '_')
+      .trim() || 'file'
+
+  return `${disposition}; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(filename)}`
+}

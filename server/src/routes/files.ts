@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { Env, Variables } from '../types'
 import { authMiddleware } from '../middleware/auth'
-import { buildHashedKey, guessContentType } from '../utils'
+import { buildHashedKey, guessContentType, buildContentDisposition } from '../utils'
 import { getCos, CosClient, CosObject } from '../storage/cos'
 import { maxUploadBytes } from '../env'
 
@@ -217,10 +217,7 @@ async function serveObject(
   }
 
   const filename = key.split('/').pop() ?? (disposition === 'attachment' ? 'download' : 'file')
-  headers.set(
-    'Content-Disposition',
-    `${disposition}; filename*=UTF-8''${encodeURIComponent(filename)}`
-  )
+  headers.set('Content-Disposition', buildContentDisposition(disposition, filename))
 
   return new Response(object.body, { headers })
 }
