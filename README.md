@@ -285,34 +285,34 @@ curl -s  http://你的域名/api/auth/me     # {"error":"Unauthorized"}，说明
 
 登录态用的是 JWT，走明文 HTTP 会有被截获的风险，**务必开 HTTPS**。
 
-> ⚠️ **改过站点目录后，文件验证很容易失败**，两种表现：
->
-> - **404** —— 宝塔把验证文件写进它面板里记录的「网站目录」，而 nginx 从新的 `root` 去找，两边对不上。所以第 6.1 步强调**必须用面板 UI 改网站目录**，手改配置里的 `root` 只改了一半。
-> - **200 但返回的是前端首页** —— `try_files $uri $uri/ /index.html` 把不存在的验证文件兜底成了 `index.html`。Let's Encrypt 会报「内容不匹配」而不是 404，容易误判成网络问题。
->
-> 先手动放个文件确认走通哪条：
->
-> ```bash
-> mkdir -p /www/wwwroot/cos-drive/frontend/dist/.well-known/acme-challenge
-> echo hello > /www/wwwroot/cos-drive/frontend/dist/.well-known/acme-challenge/test
-> curl -i http://你的域名/.well-known/acme-challenge/test
-> ```
->
-> 返回 `hello` 说明路径没问题（那多半是 80 端口不通：备案未过 / 安全组未放行）；返回 404 或 HTML 首页则按上面两种情况处理。
->
-> 保险起见可以加一条最高优先级规则，两种情况都能挡掉：
->
-> ```nginx
->     location ^~ /.well-known/acme-challenge/ {
->         default_type "text/plain";
->         allow all;
->         root /www/wwwroot/cos-drive/frontend/dist;   # 与面板「网站目录」保持一致
->     }
-> ```
->
-> `^~` 是关键，它保证这条规则压过 `location /` 的 `try_files`。
->
-> 实在搞不定就在 SSL 页面改用 **DNS 验证**，完全绕开 Web 服务器，连 80 端口通不通都不影响。代价是：DNS 托管在 DNSPod / 阿里云并填了 API 密钥才能自动续签，手动加 TXT 记录的话每 90 天要重来一次。
+#### 文件验证失败时怎么查
+
+改过站点目录后 HTTP-01 文件验证可能失败。**先在服务器上手动放个文件自测**：
+
+```bash
+mkdir -p /www/wwwroot/cos-drive/frontend/dist/.well-known/acme-challenge
+echo hello > /www/wwwroot/cos-drive/frontend/dist/.well-known/acme-challenge/test
+curl -i http://你的域名/.well-known/acme-challenge/test
+```
+
+| 返回 | 原因 |
+|------|------|
+| `hello`（`text/plain`） | 服务器侧没问题，往下看「公网可达性」 |
+| 404 | 宝塔按面板记录的「网站目录」写验证文件，nginx 按 `root` 读，两者不一致 —— 所以 6.1 步强调**用面板 UI 改网站目录**，手改 `root` 只改了一半 |
+| 200 但返回前端首页 | `location /` 的 `try_files` 把不存在的文件兜底成了 `index.html`，Let's Encrypt 会报「内容不匹配」而非 404 |
+
+> 较新版本的宝塔用 `set_by_lua_block` 在 rewrite 阶段直接读文件并返回，**不走 location 匹配，因而不受 `try_files` 影响**，且会在站点目录之外额外回退查找 `/www/wwwroot/java_node_ssl`。若你的 `/www/server/panel/vhost/nginx/well-known/<域名>.conf` 是这种写法，第三种情况不会出现。旧版本是普通 location 的话，加一条 `location ^~ /.well-known/acme-challenge/ { default_type "text/plain"; allow all; root <与面板网站目录一致>; }` 即可，`^~` 保证它压过 `try_files`。
+
+**公网可达性**（自测返回 `hello` 却仍申请失败时）：
+
+上面的 `curl` 是在服务器上访问自己，只能证明本机通。Let's Encrypt 是从公网访问的，还需确认：
+
+- 用 [letsdebug.net](https://letsdebug.net/) 输入域名、选 `http-01`，会直接指出卡在哪一步
+- 用手机流量（关 WiFi）分别访问 `http://服务器IP/` 和 `http://你的域名/`：IP 通但域名不通，是**未备案**的典型症状（大陆运营商按 Host 拦域名不拦 IP）；两个都不通则是安全组或防火墙没放行 80
+- 云平台**安全组**要单独放行 80/443，宝塔里放行不代表安全组放行，两层都要过
+- Let's Encrypt 有「每域名每小时 5 次失败验证」的限流，反复重试后即使配置正确也会继续失败，**等一小时**再试
+
+实在搞不定就在 SSL 页面改用 **DNS 验证**，完全绕开 Web 服务器，连 80 端口通不通都不影响。代价是：DNS 托管在 DNSPod / 阿里云并填了 API 密钥才能自动续签，手动加 TXT 记录的话每 90 天要重来一次。
 
 ### 第八步（可选）：配置 COS 生命周期规则
 
