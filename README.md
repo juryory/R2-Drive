@@ -20,7 +20,7 @@
 
 | 层次 | 技术 |
 |------|------|
-| 后端 | Node.js 20+ + [Hono](https://hono.dev/) + [jose](https://github.com/panva/jose)（JWT） |
+| 后端 | Node.js 20+（已在 20 / 22 / 24 上验证） + [Hono](https://hono.dev/) + [jose](https://github.com/panva/jose)（JWT） |
 | 前端 | React 18 + Vite + TailwindCSS |
 | 存储 | 腾讯云 COS（XML API，sha1 签名，无需 SDK） |
 | 认证 | HS256 JWT，存于 localStorage |
@@ -73,13 +73,75 @@
 
 > 建议不要用主账号密钥。更安全的做法：在[访问管理](https://console.cloud.tencent.com/cam/user)新建子用户，只授予这一个存储桶的读写权限，用它的密钥。
 
-### 第二步：在宝塔安装 Node.js
+### 第二步：在宝塔安装 Node.js 并接入命令行
 
-宝塔面板 → **软件商店** → 搜索并安装 **Node.js 版本管理器** → 安装 **Node 20 或更高版本**，并设为命令行默认版本。
+宝塔面板 → **软件商店** → 搜索并安装 **Node.js 版本管理器** → 安装 **Node 20 或更高版本**（本项目在 v24.18.0 上实测通过）。
+
+装完之后有个坑：**宝塔装的 Node 在自己的目录里，SSH 终端默认找不到**，直接敲 `npm` 会报：
+
+```
+Command 'npm' not found, but can be installed with:
+apt install npm
+```
+
+> ⚠️ **不要执行 `apt install npm`**。那会从 Ubuntu 源装一套很旧的 Node（往往是 v12/v18），和宝塔管理的版本并存互相打架，后面构建和 PM2 启动都会出奇怪的问题。
+
+#### 2.1 确认 Node 装在哪
+
+```bash
+ls /www/server/nodejs/
+```
+
+会列出已安装的版本目录，例如 `v24.18.0`。可执行文件都在该目录的 `bin/` 下：
+
+```bash
+ls /www/server/nodejs/v24.18.0/bin/
+# corepack  node  npm  npx
+```
+
+#### 2.2 让命令行能直接用（三选一）
+
+**方式 A：面板里设为命令行默认版本（最省事）**
+
+Node 版本管理器 → 找到已安装的版本 → 点 **「命令行版本」/「设为默认」**。设置完**退出 SSH 重新登录**再试 `npm -v`。
+
+**方式 B：手动建软链接（方式 A 不生效时用这个）**
+
+把下面的版本号换成你实际装的：
+
+```bash
+NODE_DIR=/www/server/nodejs/v24.18.0
+ln -sf $NODE_DIR/bin/node /usr/local/bin/node
+ln -sf $NODE_DIR/bin/npm  /usr/local/bin/npm
+ln -sf $NODE_DIR/bin/npx  /usr/local/bin/npx
+
+node -v && npm -v
+```
+
+**方式 C：加进 PATH**
+
+```bash
+echo 'export PATH=/www/server/nodejs/v24.18.0/bin:$PATH' >> ~/.bashrc
+source ~/.bashrc
+
+node -v && npm -v
+```
+
+> 方式 B 的软链接对所有用户和 `cron` 任务都生效，方式 C 只对当前用户的交互式 shell 生效。图省事推荐 B。
+
+#### 2.3 不想改环境的话
+
+也可以每次都写全路径，不做任何配置：
+
+```bash
+/www/server/nodejs/v24.18.0/bin/npm install
+```
+
+后文的 `npm xxx` 命令都可以照此替换。
 
 ### 第三步：拉取代码并构建
 
-SSH 登录服务器（或用宝塔的「终端」）：
+SSH 登录服务器（或用宝塔的「终端」），确认 `node -v` 能正常输出版本号后再继续：
 
 ```bash
 # 放到宝塔默认站点目录下
@@ -211,6 +273,77 @@ cd ../frontend && npm install && npm run build
 # 重启后端（宝塔 Node 项目管理器里点重启，或命令行）
 pm2 restart cos-drive
 ```
+
+---
+
+## 常见问题
+
+### `npm: command not found`
+
+宝塔装的 Node 不在系统 PATH 里。按[第二步](#第二步在宝塔安装-nodejs-并接入命令行)建软链接或改 PATH 即可。
+
+**注意不要用 `apt install npm`** —— 那装的是 Ubuntu 源里的旧版 Node，会和宝塔管理的版本冲突。
+
+### `npm install` 出现 `npm warn allow-scripts ... esbuild`
+
+类似这样的提示：
+
+```
+npm warn allow-scripts 1 package has install scripts not yet covered by allowScripts:
+npm warn allow-scripts   esbuild@0.24.2 (postinstall: node install.js)
+```
+
+**这是正常的，可以直接忽略**，不需要执行它提示的 `npm approve-scripts`。
+
+npm 11 起默认拦截依赖包的安装脚本（一项安全加固）。esbuild 的平台二进制是通过 `optionalDependencies` 分发的，不依赖这个 postinstall 脚本，所以拦掉也不影响构建。本项目在 Node 24.18.0 + npm 11.16.0 下实测前后端均可正常构建运行。
+
+### `pm2: command not found`
+
+`pm2` 是随 Node 安装的全局包，同样存在路径问题。它在 Node 目录的 `bin/` 下：
+
+```bash
+ls /www/server/nodejs/v24.18.0/bin/pm2      # 有的话建软链接
+ln -sf /www/server/nodejs/v24.18.0/bin/pm2 /usr/local/bin/pm2
+```
+
+如果压根没装过：
+
+```bash
+npm install -g pm2
+```
+
+> 用宝塔「Node 项目管理器」启动项目的话，面板会自己管理 PM2，命令行不装也行 —— 直接在面板里点启动/重启/看日志。
+
+### 用宝塔 Node 项目管理器启动后进程起不来
+
+到面板的项目日志里看报错。最常见的两种：
+
+- **`缺少必需的环境变量：...`** —— `server/.env` 没建或没填全。注意 `.env` 要放在 `server/` 目录下（和 `package.json` 同级）。
+- **`Cannot find module`** —— `npm install` 没在 `server/` 目录执行过，或者执行时用的 Node 版本和面板配置的不一致。到 `server/` 目录重新 `npm install && npm run build`。
+
+### 上传大文件失败 / 报 413
+
+nginx 的 `client_max_body_size` 小于实际文件大小。它要 **≥** `.env` 里的 `MAX_UPLOAD_MB`，改完记得重载 nginx。
+
+宝塔面板里也可以改：**网站** → 站点设置 → **配置文件**，或 **软件商店** → Nginx → 配置修改。
+
+### 前端页面能打开，但刷新子页面变 404
+
+nginx 缺少 SPA fallback。站点配置里要有：
+
+```nginx
+location / {
+    try_files $uri $uri/ /index.html;
+}
+```
+
+### 文件列表能加载，但上传/下载报 COS 错误
+
+后端会把 COS 返回的错误码原样透出，先看接口返回的 `error` 字段：
+
+- `AccessDenied` —— 密钥没有这个桶的权限，或 `COS_BUCKET` / `COS_REGION` 填错了
+- `NoSuchBucket` —— 桶名不对，注意**必须带 APPID 后缀**（如 `file-1250000000`，不是 `file`）
+- `RequestTimeTooSkewed` —— 服务器时间不准，签名过期。执行 `timedatectl` 检查，必要时开启 NTP 同步
 
 ---
 
