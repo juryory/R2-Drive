@@ -285,6 +285,35 @@ curl -s  http://你的域名/api/auth/me     # {"error":"Unauthorized"}，说明
 
 登录态用的是 JWT，走明文 HTTP 会有被截获的风险，**务必开 HTTPS**。
 
+> ⚠️ **改过站点目录后，文件验证很容易失败**，两种表现：
+>
+> - **404** —— 宝塔把验证文件写进它面板里记录的「网站目录」，而 nginx 从新的 `root` 去找，两边对不上。所以第 6.1 步强调**必须用面板 UI 改网站目录**，手改配置里的 `root` 只改了一半。
+> - **200 但返回的是前端首页** —— `try_files $uri $uri/ /index.html` 把不存在的验证文件兜底成了 `index.html`。Let's Encrypt 会报「内容不匹配」而不是 404，容易误判成网络问题。
+>
+> 先手动放个文件确认走通哪条：
+>
+> ```bash
+> mkdir -p /www/wwwroot/cos-drive/frontend/dist/.well-known/acme-challenge
+> echo hello > /www/wwwroot/cos-drive/frontend/dist/.well-known/acme-challenge/test
+> curl -i http://你的域名/.well-known/acme-challenge/test
+> ```
+>
+> 返回 `hello` 说明路径没问题（那多半是 80 端口不通：备案未过 / 安全组未放行）；返回 404 或 HTML 首页则按上面两种情况处理。
+>
+> 保险起见可以加一条最高优先级规则，两种情况都能挡掉：
+>
+> ```nginx
+>     location ^~ /.well-known/acme-challenge/ {
+>         default_type "text/plain";
+>         allow all;
+>         root /www/wwwroot/cos-drive/frontend/dist;   # 与面板「网站目录」保持一致
+>     }
+> ```
+>
+> `^~` 是关键，它保证这条规则压过 `location /` 的 `try_files`。
+>
+> 实在搞不定就在 SSL 页面改用 **DNS 验证**，完全绕开 Web 服务器，连 80 端口通不通都不影响。代价是：DNS 托管在 DNSPod / 阿里云并填了 API 密钥才能自动续签，手动加 TXT 记录的话每 90 天要重来一次。
+
 ### 第八步（可选）：配置 COS 生命周期规则
 
 让"分享上传链接"上传的文件 1 个月后自动删除：
